@@ -1,5 +1,6 @@
 package br.com.matheuslealpa.apigatewayspringlab;
 
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.Optional;
 
@@ -20,7 +21,7 @@ public class RateLimitConfig {
     static String clientIp(ServerHttpRequest request) {
         return Optional.ofNullable(request.getRemoteAddress())
                 .map(InetSocketAddress::getAddress)
-                .map(address -> address.getHostAddress())
+                .map(InetAddress::getHostAddress)
                 .orElse("unknown");
     }
 }
