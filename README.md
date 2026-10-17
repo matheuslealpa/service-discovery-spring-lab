@@ -64,6 +64,42 @@ api-gateway-spring-lab  http get  /api1/chain
 
 Detalhe de implementação: o `api1` não declara um bean `@LoadBalanced RestClient.Builder`. O cliente Eureka pega qualquer `RestClient.Builder` do contexto para falar com o servidor de registro e, se ele for balanceado, tenta resolver `localhost` como serviço e o registro falha. O controller usa o builder padrão do Boot (já instrumentado) e adiciona o `LoadBalancerInterceptor` à mão.
 
+## Múltiplas instâncias
+
+Como `api1` e `api2` usam `server.port=0`, basta subir o mesmo jar mais de uma vez para ter várias instâncias registradas. O `/hello` devolve o `instanceId` e a porta de quem respondeu.
+
+Pegadinha: o `instanceId` padrão é `host:app:porta`, e com porta `0` ele vira `192.168.1.12:api1:0` para todas as cópias. A segunda instância sobrescreve a primeira no Eureka, e quando uma delas encerra, cancela o registro das outras. Por isso o id é gerado com UUID:
+
+```properties
+eureka.instance.instance-id=${spring.application.name}:${random.uuid}
+```
+
+Com duas instâncias de `api1`, o gateway distribui em round-robin (10 chamadas, 5 para cada).
+
+### Tempo para detectar uma instância morta
+
+Experimento: duas instâncias de `api1`, `kill -9` em uma delas, uma chamada por segundo em `GET /api1/hello` até estabilizar.
+
+| Momento  | O que aconteceu                                                                                   |
+|----------|---------------------------------------------------------------------------------------------------|
+| +0s      | Primeiro `500`. O gateway ainda balanceia para a instância morta: `Conexão recusada`              |
+| +90s     | Lease expirou no Eureka (`lease-expiration-duration-in-seconds=90`)                               |
+| +211s    | Eureka evictou a instância. O timer roda a cada 60s e evicta poucas por ciclo (`evictionLimit=1`) |
+| +249s    | Último `500`. Gateway atualizou o registro (30s) e o cache do LoadBalancer expirou (35s)          |
+
+Resultado: 122 erros em 284 requisições, cerca de metade das chamadas falhando por mais de 4 minutos. Nenhum componente está quebrado; são os tempos padrão somados. Para encurtar, os botões são:
+
+| Onde     | Propriedade                                          | Padrão |
+|----------|------------------------------------------------------|--------|
+| Eureka   | `eureka.server.eviction-interval-timer-in-ms`        | 60000  |
+| Eureka   | `eureka.server.renewal-percent-threshold`            | 0.85   |
+| api      | `eureka.instance.lease-renewal-interval-in-seconds`  | 30     |
+| api      | `eureka.instance.lease-expiration-duration-in-seconds` | 90   |
+| gateway  | `eureka.client.registry-fetch-interval-seconds`      | 30     |
+| gateway  | `spring.cloud.loadbalancer.cache.ttl`                | 35s    |
+
+Outra saída é tratar o sintoma no gateway com o filtro `Retry`, repetindo a chamada na outra instância quando a conexão é recusada.
+
 ## Requisitos
 
 - Java 25 (ver `.sdkmanrc` em cada módulo)
@@ -94,6 +130,13 @@ curl localhost:8080/api2/hello
 
 # rate limit
 for i in $(seq 1 500); do curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/api1/hello; done
+
+# múltiplas instâncias: suba o api1 de novo em outro terminal e veja o round-robin
+cd api1 && ./mvnw spring-boot:run
+for i in $(seq 1 10); do curl -s localhost:8080/api1/hello; echo; done
+
+# instância morta: mate uma com kill -9 e acompanhe os 500 até o Eureka evictar
+for i in $(seq 1 300); do curl -s -o /dev/null -w "+${i}s %{http_code}\n" localhost:8080/api1/hello; sleep 1; done
 
 # tracing: gateway -> api1 -> api2 no mesmo trace
 curl localhost:8080/api1/chain
