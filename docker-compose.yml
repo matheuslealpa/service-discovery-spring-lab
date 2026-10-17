@@ -1,2 +1,3 @@
 include:
   - infra/redis/docker-compose.yml
+  - infra/jaeger/docker-compose.yml
